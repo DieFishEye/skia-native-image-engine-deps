@@ -33,18 +33,30 @@ jobs:
           cd "$HOME"
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
-      - name: Clone Skia + sync deps
+      - name: Fetch Skia deps (gclient sync)
         shell: msys2 {0}
         run: |
           set -eux
           export PATH="$HOME/depot_tools:$PATH"
 
-          git clone https://skia.googlesource.com/skia
+          mkdir -p skia
           cd skia
-          # ✅ 关键：跳过 emsdk（我们构建 Windows MINGW 不需要 wasm）
-          export SKIA_SKIP_EMSDK=1
-          python tools/git-sync-deps
 
+          # ✅ 生成 .gclient 配置
+          cat > .gclient << 'EOF'
+          solutions = [
+            {
+              "name": "skia",
+              "url": "https://skia.googlesource.com/skia.git",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+            },
+          ]
+          EOF
+
+          # ✅ 拉代码 + 同步依赖
+          gclient sync --nohooks --with_branch_heads --with_tags
       # ✅ 编译 Skia（CPU-only，先禁 GPU）
       - name: Build Skia (mingw64 cpu-only)
         shell: msys2 {0}
