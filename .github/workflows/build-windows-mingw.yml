@@ -41,6 +41,8 @@ jobs:
 
           git clone https://skia.googlesource.com/skia
           cd skia
+          # ✅ 关键：跳过 emsdk（我们构建 Windows MINGW 不需要 wasm）
+          export SKIA_SKIP_EMSDK=1
           python tools/git-sync-deps
 
       # ✅ 编译 Skia（CPU-only，先禁 GPU）
