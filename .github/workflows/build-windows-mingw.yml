@@ -11,7 +11,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ✅ 安装 MSYS2 + MinGW64 + ninja + python + git
+      # 1) 安装 Git for Windows（depot_tools/gclient 在 Windows 上非常依赖它）
+      - name: Install Git for Windows (choco)
+        shell: pwsh
+        run: |
+          choco install git -y
+          git --version
+
+      # 2) 拉 depot_tools
+      - name: Fetch depot_tools
+        shell: pwsh
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $env:USERPROFILE\depot_tools
+
+      # 3) gclient sync Skia（关键：--nohooks 避免 activate-emsdk 之类的东西）
+      - name: Sync Skia deps (gclient sync --nohooks)
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:USERPROFILE\depot_tools;$env:PATH"
+
+          New-Item -ItemType Directory -Force -Path skia | Out-Null
+          Set-Location skia
+
+          @"
+          solutions = [
+            {
+              "name": "skia",
+              "url": "https://skia.googlesource.com/skia.git",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+            },
+          ]
+          "@ | Out-File -Encoding ascii .gclient
+
+          gclient sync --nohooks --with_branch_heads --with_tags
+
+      # 4) 安装 MSYS2 + MinGW64 工具链（负责编译）
       - name: Setup MSYS2 (mingw64)
         uses: msys2/setup-msys2@v2
         with:
@@ -23,50 +59,19 @@ jobs:
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-clang
-            mingw-w64-x86_64-python
 
-      # ✅ 拉 depot_tools（Chromium 的构建工具集：gn/ninja 相关）
-      - name: Fetch depot_tools
-        shell: msys2 {0}
-        run: |
-          set -eux
-          cd "$HOME"
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-
-      - name: Fetch Skia deps (gclient sync)
-        shell: msys2 {0}
-        run: |
-          set -eux
-          export PATH="$HOME/depot_tools:$PATH"
-
-          mkdir -p skia
-          cd skia
-
-          # ✅ 生成 .gclient 配置
-          cat > .gclient << 'EOF'
-          solutions = [
-            {
-              "name": "skia",
-              "url": "https://skia.googlesource.com/skia.git",
-              "deps_file": "DEPS",
-              "managed": False,
-              "custom_deps": {},
-            },
-          ]
-          EOF
-
-          # ✅ 拉代码 + 同步依赖
-          gclient sync --nohooks --with_branch_heads --with_tags
-      # ✅ 编译 Skia（CPU-only，先禁 GPU）
+      # 5) 编译 Skia（在 MSYS2 环境跑 gn/ninja）
       - name: Build Skia (mingw64 cpu-only)
         shell: msys2 {0}
         run: |
           set -eux
-          export PATH="$HOME/depot_tools:$PATH"
 
-          cd skia
+          # depot_tools 在 Windows 用户目录中，MSYS2 下路径是 /c/Users/<user>/depot_tools
+          export PATH="/c/Users/runneradmin/depot_tools:$PATH"
 
-          # 生成 build 目录
+          cd skia/skia
+
+          # CPU-only + 裁剪大模块（先求能编出来）
           gn gen out/imgconv --args='
             is_official_build=true
             is_component_build=false
@@ -75,10 +80,9 @@ jobs:
             skia_enable_pdf=false
           '
 
-          # 编译
           ninja -C out/imgconv
 
-      # ✅ 打包产物
+      # 6) 打包产物：include + *.a
       - name: Package artifacts
         shell: msys2 {0}
         run: |
@@ -87,14 +91,13 @@ jobs:
           mkdir -p out_pkg/windows_amd64/lib
           mkdir -p out_pkg/windows_amd64/include
 
-          # 头文件（先粗暴全拷，后面你可以裁剪）
-          cp -r skia/include out_pkg/windows_amd64/include/
+          # 头文件（先全拷，后续你可以裁剪）
+          cp -r skia/skia/include out_pkg/windows_amd64/include/
 
-          # Skia 静态库产物名可能因版本而不同
-          # 这里尽量把 out/imgconv 下的 .a 都收集走
-          find skia/out/imgconv -maxdepth 1 -type f -name "*.a" -print -exec cp {} out_pkg/windows_amd64/lib/ \;
+          # 收集 out/imgconv 下的静态库
+          find skia/skia/out/imgconv -maxdepth 1 -type f -name "*.a" -print -exec cp {} out_pkg/windows_amd64/lib/ \;
 
-          # 打包 zip（Windows 上用 zip 更方便）
+          # 打 zip
           cd out_pkg
           python -c "import shutil; shutil.make_archive('skia-windows_amd64', 'zip', 'windows_amd64')"
 
