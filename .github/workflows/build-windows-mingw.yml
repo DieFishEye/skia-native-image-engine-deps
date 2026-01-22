@@ -11,20 +11,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) 安装 Git for Windows（depot_tools/gclient 在 Windows 上非常依赖它）
+      # 1) Git for Windows（depot_tools/gclient 需要原生 git.exe）
       - name: Install Git for Windows (choco)
         shell: pwsh
         run: |
           choco install git -y
           git --version
 
-      # 2) 拉 depot_tools
+      # 2) depot_tools
       - name: Fetch depot_tools
         shell: pwsh
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git $env:USERPROFILE\depot_tools
 
-      # 3) gclient sync Skia（关键：--nohooks 避免 activate-emsdk 之类的东西）
+      # 3) gclient sync（不跑 hooks，先只拉代码+deps）
       - name: Sync Skia deps (gclient sync --nohooks)
         shell: pwsh
         run: |
@@ -47,42 +47,56 @@ jobs:
 
           gclient sync --nohooks --with_branch_heads --with_tags
 
-      # 4) 安装 MSYS2 + MinGW64 工具链（负责编译）
+      # 4) ✅ 关键：安装 GN（不依赖 Skia checkout 自带的 gn.exe）
+      # 使用 depot_tools 自带的 python 脚本去拉 buildtools（含 gn.exe）
+      - name: Ensure GN is available
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:USERPROFILE\depot_tools;$env:PATH"
+          # 在 Windows 上，depot_tools 通常会提供 gn.bat/gn.py 或通过 CIPD 拉取
+          # 这里直接验证 gn 是否可用；不可用则通过 gclient runhooks 拉 buildtools
+          try {
+            gn --version
+            Write-Host "GN is already available."
+          } catch {
+            Write-Host "GN not found. Running gclient runhooks to fetch buildtools..."
+            Set-Location skia
+            # 只跑 hooks 来拉 buildtools/gn（若 hooks 触发 emsdk，我们下一步再禁用 hook）
+            gclient runhooks
+            gn --version
+          }
+
+      # 5) MSYS2 + MinGW64（只用于编译）
       - name: Setup MSYS2 (mingw64)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
           install: >-
-            git
             python
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-clang
 
-      # 5) 编译 Skia（在 MSYS2 环境跑 gn/ninja）
+      # 6) Build（用 depot_tools 的 gn / ninja）
       - name: Build Skia (mingw64 cpu-only)
         shell: msys2 {0}
         run: |
           set -eux
 
-          # depot_tools 在 Windows 用户目录中，MSYS2 下路径是 /c/Users/<user>/depot_tools
+          # depot_tools 在 Windows 用户目录
           export PATH="/c/Users/runneradmin/depot_tools:$PATH"
+
+          # ✅ 必须能找到 gn
+          gn --version
 
           cd skia/skia
 
-          # CPU-only + 裁剪大模块（先求能编出来）
-          gn gen out/imgconv --args='
-            is_official_build=true
-            is_component_build=false
-            skia_enable_gpu=false
-            skia_enable_skshaper=false
-            skia_enable_pdf=false
-          '
-
+          # 先求能编出来：CPU-only + 关大模块
+          gn gen out/imgconv --args='is_official_build=true is_component_build=false skia_enable_gpu=false skia_enable_skshaper=false skia_enable_pdf=false'
           ninja -C out/imgconv
 
-      # 6) 打包产物：include + *.a
+      # 7) 打包
       - name: Package artifacts
         shell: msys2 {0}
         run: |
@@ -91,13 +105,10 @@ jobs:
           mkdir -p out_pkg/windows_amd64/lib
           mkdir -p out_pkg/windows_amd64/include
 
-          # 头文件（先全拷，后续你可以裁剪）
           cp -r skia/skia/include out_pkg/windows_amd64/include/
 
-          # 收集 out/imgconv 下的静态库
           find skia/skia/out/imgconv -maxdepth 1 -type f -name "*.a" -print -exec cp {} out_pkg/windows_amd64/lib/ \;
 
-          # 打 zip
           cd out_pkg
           python -c "import shutil; shutil.make_archive('skia-windows_amd64', 'zip', 'windows_amd64')"
 
