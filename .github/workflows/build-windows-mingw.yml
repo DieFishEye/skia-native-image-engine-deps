@@ -1,0 +1,91 @@
+name: build-skia-windows-mingw
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows_mingw:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ✅ 安装 MSYS2 + MinGW64 + ninja + python + git
+      - name: Setup MSYS2 (mingw64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            python
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-python
+
+      # ✅ 拉 depot_tools（Chromium 的构建工具集：gn/ninja 相关）
+      - name: Fetch depot_tools
+        shell: msys2 {0}
+        run: |
+          set -eux
+          cd "$HOME"
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+
+      - name: Clone Skia + sync deps
+        shell: msys2 {0}
+        run: |
+          set -eux
+          export PATH="$HOME/depot_tools:$PATH"
+
+          git clone https://skia.googlesource.com/skia
+          cd skia
+          python tools/git-sync-deps
+
+      # ✅ 编译 Skia（CPU-only，先禁 GPU）
+      - name: Build Skia (mingw64 cpu-only)
+        shell: msys2 {0}
+        run: |
+          set -eux
+          export PATH="$HOME/depot_tools:$PATH"
+
+          cd skia
+
+          # 生成 build 目录
+          gn gen out/imgconv --args='
+            is_official_build=true
+            is_component_build=false
+            skia_enable_gpu=false
+            skia_enable_skshaper=false
+            skia_enable_pdf=false
+          '
+
+          # 编译
+          ninja -C out/imgconv
+
+      # ✅ 打包产物
+      - name: Package artifacts
+        shell: msys2 {0}
+        run: |
+          set -eux
+
+          mkdir -p out_pkg/windows_amd64/lib
+          mkdir -p out_pkg/windows_amd64/include
+
+          # 头文件（先粗暴全拷，后面你可以裁剪）
+          cp -r skia/include out_pkg/windows_amd64/include/
+
+          # Skia 静态库产物名可能因版本而不同
+          # 这里尽量把 out/imgconv 下的 .a 都收集走
+          find skia/out/imgconv -maxdepth 1 -type f -name "*.a" -print -exec cp {} out_pkg/windows_amd64/lib/ \;
+
+          # 打包 zip（Windows 上用 zip 更方便）
+          cd out_pkg
+          python -c "import shutil; shutil.make_archive('skia-windows_amd64', 'zip', 'windows_amd64')"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skia-windows_amd64
+          path: out_pkg/skia-windows_amd64.zip
