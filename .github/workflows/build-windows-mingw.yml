@@ -52,19 +52,26 @@ jobs:
       - name: Ensure GN is available
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $env:PATH = "$env:USERPROFILE\depot_tools;$env:PATH"
-          # 在 Windows 上，depot_tools 通常会提供 gn.bat/gn.py 或通过 CIPD 拉取
-          # 这里直接验证 gn 是否可用；不可用则通过 gclient runhooks 拉 buildtools
-          try {
-            gn --version
-            Write-Host "GN is already available."
-          } catch {
-            Write-Host "GN not found. Running gclient runhooks to fetch buildtools..."
+
+          Write-Host "PATH=$env:PATH"
+          Write-Host "Checking gn availability..."
+
+          # ✅ 外部命令失败不会自动 throw，所以我们必须看 $LASTEXITCODE
+          gn --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "gn not found yet. Running gclient runhooks to fetch buildtools..."
             Set-Location skia
-            # 只跑 hooks 来拉 buildtools/gn（若 hooks 触发 emsdk，我们下一步再禁用 hook）
             gclient runhooks
+            if ($LASTEXITCODE -ne 0) { throw "gclient runhooks failed" }
+
             gn --version
+            if ($LASTEXITCODE -ne 0) { throw "gn still not available after runhooks" }
           }
+
+          Write-Host "GN OK."
 
       # 5) MSYS2 + MinGW64（只用于编译）
       - name: Setup MSYS2 (mingw64)
